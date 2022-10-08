@@ -1,7 +1,7 @@
-package be.nabu.utils.odata.parser;
+package be.nabu.libs.odata.parser;
 
+import be.nabu.libs.odata.types.NavigationProperty;
 import be.nabu.libs.types.api.Element;
-import be.nabu.utils.odata.types.NavigationProperty;
 
 public class NavigationPropertyImpl implements NavigationProperty {
 

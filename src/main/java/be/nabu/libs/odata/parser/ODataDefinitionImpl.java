@@ -1,12 +1,12 @@
-package be.nabu.utils.odata.parser;
+package be.nabu.libs.odata.parser;
 
 import java.util.List;
 
+import be.nabu.libs.odata.ODataDefinition;
+import be.nabu.libs.odata.types.ConformanceLevel;
+import be.nabu.libs.odata.types.Function;
+import be.nabu.libs.odata.types.NavigationProperty;
 import be.nabu.libs.types.api.TypeRegistry;
-import be.nabu.utils.odata.ODataDefinition;
-import be.nabu.utils.odata.types.ConformanceLevel;
-import be.nabu.utils.odata.types.Function;
-import be.nabu.utils.odata.types.NavigationProperty;
 
 public class ODataDefinitionImpl implements ODataDefinition {
 

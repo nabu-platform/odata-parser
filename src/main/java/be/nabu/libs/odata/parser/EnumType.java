@@ -1,4 +1,4 @@
-package be.nabu.utils.odata.parser;
+package be.nabu.libs.odata.parser;
 
 import be.nabu.libs.property.api.Value;
 import be.nabu.libs.types.api.Type;

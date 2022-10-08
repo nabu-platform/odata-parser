@@ -48,6 +48,10 @@
 			<artifactId>utils-xml</artifactId>
 		</dependency>
 		<dependency>
+			<groupId>be.nabu.libs.types</groupId>
+			<artifactId>types-xml</artifactId>
+		</dependency>
+		<dependency>
 			<groupId>be.nabu.libs.http</groupId>
 			<artifactId>http-api</artifactId>
 		</dependency>

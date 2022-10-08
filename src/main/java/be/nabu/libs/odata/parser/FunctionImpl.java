@@ -1,7 +1,7 @@
-package be.nabu.utils.odata.parser;
+package be.nabu.libs.odata.parser;
 
+import be.nabu.libs.odata.types.Function;
 import be.nabu.libs.types.api.ComplexType;
-import be.nabu.utils.odata.types.Function;
 
 public class FunctionImpl implements Function {
 	private boolean action;

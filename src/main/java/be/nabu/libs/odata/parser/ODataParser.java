@@ -1,4 +1,4 @@
-package be.nabu.utils.odata.parser;
+package be.nabu.libs.odata.parser;
 
 import java.io.InputStream;
 import java.net.CookieManager;
@@ -7,6 +7,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.text.ParseException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -24,6 +25,8 @@ import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 
 import be.nabu.libs.evaluator.PathAnalyzer;
+import be.nabu.libs.evaluator.QueryParser;
+import be.nabu.libs.evaluator.api.Operation;
 import be.nabu.libs.evaluator.impl.PlainOperationProvider;
 import be.nabu.libs.events.impl.EventDispatcherImpl;
 import be.nabu.libs.http.api.HTTPRequest;
@@ -33,12 +36,15 @@ import be.nabu.libs.http.client.nio.NIOHTTPClientImpl;
 import be.nabu.libs.http.core.CustomCookieStore;
 import be.nabu.libs.http.core.DefaultHTTPRequest;
 import be.nabu.libs.http.server.nio.MemoryMessageDataProvider;
+import be.nabu.libs.odata.ODataDefinition;
+import be.nabu.libs.odata.types.Function;
+import be.nabu.libs.odata.types.NavigationProperty;
+import be.nabu.libs.property.ValueUtils;
 import be.nabu.libs.property.api.Value;
 import be.nabu.libs.resources.URIUtils;
-import be.nabu.libs.types.ParsedPath;
 import be.nabu.libs.types.SimpleTypeWrapperFactory;
 import be.nabu.libs.types.TypeRegistryImpl;
-import be.nabu.libs.types.api.ComplexContent;
+import be.nabu.libs.types.TypeUtils;
 import be.nabu.libs.types.api.ComplexType;
 import be.nabu.libs.types.api.SimpleType;
 import be.nabu.libs.types.api.Type;
@@ -48,33 +54,36 @@ import be.nabu.libs.types.base.SimpleElementImpl;
 import be.nabu.libs.types.base.TypeBaseUtils;
 import be.nabu.libs.types.base.ValueImpl;
 import be.nabu.libs.types.java.BeanResolver;
+import be.nabu.libs.types.properties.AliasProperty;
 import be.nabu.libs.types.properties.CollectionNameProperty;
 import be.nabu.libs.types.properties.EnumerationProperty;
 import be.nabu.libs.types.properties.MaxOccursProperty;
 import be.nabu.libs.types.properties.MinOccursProperty;
+import be.nabu.libs.types.properties.NameProperty;
 import be.nabu.libs.types.properties.NillableProperty;
 import be.nabu.libs.types.properties.PrimaryKeyProperty;
 import be.nabu.libs.types.properties.RestrictProperty;
 import be.nabu.libs.types.structure.DefinedStructure;
 import be.nabu.libs.types.structure.Structure;
+import be.nabu.libs.types.xml.XMLContent;
 import be.nabu.utils.io.IOUtils;
 import be.nabu.utils.io.api.ByteBuffer;
 import be.nabu.utils.io.api.ReadableContainer;
 import be.nabu.utils.mime.api.ContentPart;
 import be.nabu.utils.mime.impl.MimeHeader;
 import be.nabu.utils.mime.impl.PlainMimeEmptyPart;
-import be.nabu.utils.odata.ODataDefinition;
-import be.nabu.utils.odata.types.Function;
-import be.nabu.utils.odata.types.NavigationProperty;
 import be.nabu.utils.xml.BaseNamespaceResolver;
 import be.nabu.utils.xml.XMLUtils;
 import be.nabu.utils.xml.XPath;
 
 /**
  * The parser initially used XPath in a number of places.
- * However, when loading the odata definition file for navision (which is 8.5mb without pretty print)
- * It took 1.5 min to parse on an i9 laptop.
- * A cursory glance at jvisualvm confirmed that 98% of the overhead was xpath. So the queries were replaced with dedicated methods for performance reasons.
+ * However, when loading the odata definition file for navision (which is 8.5mb without pretty print). The file is so massive that visual studio code can not prettify it on an i9 laptop with 32gb ram.
+ * The parser initially took 1.5 min to parse the entire file into structures etc on an i9 laptop.
+ * A cursory glance at jvisualvm confirmed that 98% of the overhead was xpath. 
+ * So i added an alternative implementation where all the queries are performed with the blox/glue engine. The parser then took 1.2s.
+ * I did not dig too deep into the differences, the evaluation engine has historically been faster than the standard xpath but i think part of the overhead might be constructing the queries because of the massive amount of times the queries have to be run.
+ * I did not test this but currently the xpath queries are constructing every time while the queryparser inherently caches parsed queries.
  */
 
 public class ODataParser {
@@ -83,7 +92,7 @@ public class ODataParser {
 	
 	private static final String NS_EDM = "http://docs.oasis-open.org/odata/ns/edm";
 	private static final String NS_EDMX = "http://docs.oasis-open.org/odata/ns/edmx";
-	
+
 	private Logger logger = LoggerFactory.getLogger(getClass());
 	private String baseId;
 	
@@ -247,10 +256,14 @@ public class ODataParser {
 		Type type = getType(definition, typeName);
 		
 		// by default we can insert
-		boolean canInsert = !singleton && "true".equals(query(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='Insertable']/@Bool").asString("true"));
-		boolean canSearch = !singleton;
-		boolean canDelete = !singleton;
-		boolean canUpdate = true;
+//		boolean canInsert = !singleton && "true".equals(query(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='Insertable']/@Bool").asString("true"));
+		boolean canInsert = !singleton && "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='Insertable']/@Bool", "true"));
+		boolean canSearch = !singleton && "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.SearchRestrictions']/edm:Record/edm:PropertyValue[@Property='Searchable']/@Bool", "true"));
+		boolean canDelete = !singleton && "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.DeleteRestrictions']/edm:Record/edm:PropertyValue[@Property='Deletable']/@Bool", "true"));
+		boolean canUpdate = true && "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.UpdateRestrictions']/edm:Record/edm:PropertyValue[@Property='Updatable']/@Bool", "true"));
+		// we presume you can always list/read though additional searching is not always guaranteed
+		boolean listable = true;
+		boolean gettable = listable;
 		
 		// if we can insert, we want to add a function for that
 		// we make an extension of the original type
@@ -262,9 +275,8 @@ public class ODataParser {
 			inputExtension.setName(name + "Insert");
 			inputExtension.setNamespace(namespace);
 			inputExtension.setSuperType(type);
-			for (Element restricted : query(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='NonInsertableProperties']/edm:Collection/edm:PropertyPath").asElementList()) {
-				restrictedNames.add(restricted.getTextContent().trim());
-			}
+//			for (Element restricted : query(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='NonInsertableProperties']/edm:Collection/edm:PropertyPath").asElementList()) {
+			restrictedNames.addAll(queryAsStringList(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='NonInsertableProperties']/edm:Collection/edm:PropertyPath"));
 			// if we have restricted names within the fields, we have to restrict them from the parent type
 			if (!restrictedNames.isEmpty()) {
 				StringBuilder builder = new StringBuilder();
@@ -277,9 +289,8 @@ public class ODataParser {
 				inputExtension.setProperty(new ValueImpl<String>(RestrictProperty.getInstance(), builder.toString()));
 			}
 			// navigation properties are not present in the parent type so we don't need to restrict them, we just need to _not_ add them
-			for (Element restricted : query(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='NonInsertableNavigationProperties']/edm:Collection/edm:NavigationPropertyPath").asElementList()) {
-				restrictedNames.add(restricted.getTextContent().trim());
-			}
+//			for (Element restricted : query(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='NonInsertableNavigationProperties']/edm:Collection/edm:NavigationPropertyPath").asElementList()) {
+			restrictedNames.addAll(queryAsStringList(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='NonInsertableNavigationProperties']/edm:Collection/edm:NavigationPropertyPath"));
 			for (NavigationProperty navigatableChild : navigatableChildren) {
 				// if we haven't restricted it, add it as an optional element (list?) to the insert
 				if (!restrictedNames.contains(navigatableChild.getElement().getName())) {
@@ -290,7 +301,7 @@ public class ODataParser {
 			input.setName("input");
 			input.add(new ComplexElementImpl("create", inputExtension, input));
 			Structure output = new Structure();
-			output.setName("input");
+			output.setName("output");
 			FunctionImpl insert = new FunctionImpl();
 			insert.setContext(name);
 			insert.setMethod("POST");
@@ -299,6 +310,135 @@ public class ODataParser {
 			insert.setAction(true);
 			insert.setName("create");
 			definition.getFunctions().add(insert);
+		}
+		if (listable) {
+			Structure input = new Structure();
+			input.setName("input");
+			if (canSearch) {
+				input.add(new SimpleElementImpl<String>("query", SimpleTypeWrapperFactory.getInstance().getWrapper().wrap(String.class), input, new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0)));
+			}
+			Structure output = new Structure();
+			output.setName("output");
+			output.add(new ComplexElementImpl("results", (ComplexType) type, output,
+				new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0),
+				new ValueImpl<Integer>(MaxOccursProperty.getInstance(), 0),
+				new ValueImpl<String>(AliasProperty.getInstance(), "value")));
+			FunctionImpl list = new FunctionImpl();
+			list.setContext(name);
+			list.setInput(input);
+			list.setOutput(output);
+			list.setMethod("GET");
+			list.setName("list");
+			definition.getFunctions().add(list);
+		}
+		if (gettable) {
+			Structure input = new Structure();
+			input.setName("input");
+			boolean foundPrimary = false;
+			for (be.nabu.libs.types.api.Element<?> child : TypeUtils.getAllChildren(((ComplexType) type))) {
+				Boolean primaryKey = ValueUtils.getValue(PrimaryKeyProperty.getInstance(), child.getProperties());
+				if (primaryKey != null && primaryKey) {
+					be.nabu.libs.types.api.Element<?> cloned = TypeBaseUtils.clone(child, input);
+					// we want to standardize the name
+					// standardizing the name makes it easier to predict the input but less obvious for users which field the actual key is
+//					cloned.setProperty(new ValueImpl<String>(NameProperty.getInstance(), "id"));
+					// in such a case it is mandatory!
+					cloned.setProperty(new ValueImpl<Integer>(MinOccursProperty.getInstance(), 1));
+					input.add(cloned);
+					foundPrimary = true;
+				}
+			}
+			if (foundPrimary) {
+				Structure output = new Structure();
+				output.setName("output");
+				output.add(new ComplexElementImpl("result", (ComplexType) type, output,
+					new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0)));
+				FunctionImpl get = new FunctionImpl();
+				get.setContext(name);
+				get.setInput(input);
+				get.setOutput(output);
+				get.setMethod("GET");
+				get.setName("get");
+				definition.getFunctions().add(get);
+			}
+		}
+		if (canDelete) {
+			Structure input = new Structure();
+			input.setName("input");
+			boolean foundPrimary = false;
+			for (be.nabu.libs.types.api.Element<?> child : TypeUtils.getAllChildren(((ComplexType) type))) {
+				Boolean primaryKey = ValueUtils.getValue(PrimaryKeyProperty.getInstance(), child.getProperties());
+				if (primaryKey != null && primaryKey) {
+					be.nabu.libs.types.api.Element<?> cloned = TypeBaseUtils.clone(child, input);
+					// we want to standardize the name
+//					cloned.setProperty(new ValueImpl<String>(NameProperty.getInstance(), "id"));
+					// in such a case it is mandatory!
+					cloned.setProperty(new ValueImpl<Integer>(MinOccursProperty.getInstance(), 1));
+					input.add(cloned);
+					foundPrimary = true;
+				}
+			}
+			if (foundPrimary) {
+				Structure output = new Structure();
+				output.setName("output");
+				FunctionImpl delete = new FunctionImpl();
+				delete.setContext(name);
+				delete.setInput(input);
+				delete.setOutput(output);
+				delete.setMethod("DELETE");
+				delete.setName("delete");
+				definition.getFunctions().add(delete);
+			}
+		}
+		// when we say updates, we mean puts where the entire object is updated rather than just part of it
+		if (canUpdate) {
+			List<String> restrictedNames = new ArrayList<String>();
+			Structure inputExtension = new Structure();
+			inputExtension.setName(name + "Update");
+			inputExtension.setNamespace(namespace);
+			inputExtension.setSuperType(type);
+//			for (Element restricted : query(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='NonInsertableProperties']/edm:Collection/edm:PropertyPath").asElementList()) {
+			restrictedNames.addAll(queryAsStringList(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.UpdateRestrictions']/edm:Record/edm:PropertyValue[@Property='NonUpdatableProperties']/edm:Collection/edm:PropertyPath"));
+			// if we have restricted names within the fields, we have to restrict them from the parent type
+			if (!restrictedNames.isEmpty()) {
+				StringBuilder builder = new StringBuilder();
+				for (String restrictedName : restrictedNames) {
+					if (!builder.toString().isEmpty()) {
+						builder.append(",");
+					}
+					builder.append(restrictedName);
+				}
+				inputExtension.setProperty(new ValueImpl<String>(RestrictProperty.getInstance(), builder.toString()));
+			}
+			Structure input = new Structure();
+			input.setName("input");
+			boolean foundPrimary = false;
+			for (be.nabu.libs.types.api.Element<?> child : TypeUtils.getAllChildren(((ComplexType) type))) {
+				Boolean primaryKey = ValueUtils.getValue(PrimaryKeyProperty.getInstance(), child.getProperties());
+				if (primaryKey != null && primaryKey) {
+					be.nabu.libs.types.api.Element<?> cloned = TypeBaseUtils.clone(child, input);
+					// we want to standardize the name
+//					cloned.setProperty(new ValueImpl<String>(NameProperty.getInstance(), "id"));
+					// in such a case it is mandatory!
+					cloned.setProperty(new ValueImpl<Integer>(MinOccursProperty.getInstance(), 1));
+					input.add(cloned);
+					foundPrimary = true;
+				}
+			}
+			if (foundPrimary) {
+				input.add(new ComplexElementImpl("update", inputExtension, input));
+				Structure output = new Structure();
+				output.setName("input");
+				FunctionImpl update = new FunctionImpl();
+				update.setContext(name);
+				update.setContext(name);
+				update.setMethod("PUT");
+				update.setInput(input);
+				update.setOutput(output);
+				update.setAction(true);
+				update.setName("update");
+				definition.getFunctions().add(update);
+			}
 		}
 	}
 	
@@ -312,20 +452,86 @@ public class ODataParser {
 		return navigatableChildren;
 	}
 	
-	private List<String> queryContent(Node node, String query) {
-		ParsedPath parsedPath = new ParsedPath(query);
+	private boolean optimizedQuerying = true;
+	
+	private List<Element> queryAsElementList(Element element, String query) {
+		if (optimizedQuerying) {
+			Object queryContent = queryContent(element, query);
+			List<Element> result = new ArrayList<Element>();
+			if (queryContent == null) {
+				return result;
+			}
+			if (!(queryContent instanceof List)) {
+				queryContent = Arrays.asList(queryContent);
+			}
+			for (Object single : (List<?>) queryContent) {
+				if (single == null) {
+					continue;
+				}
+				result.add(((XMLContent) single).getElement());
+			}
+			return result;
+		}
+		else {
+			return query(element, query).asElementList();
+		}
 	}
 	
-	private ParsedPath parseQuery(String query) {
+	private List<String> queryAsStringList(Element element, String query) {
+		List<String> result = new ArrayList<String>();
+		if (optimizedQuerying) {
+			Object queryContent = queryContent(element, query);
+			if (queryContent == null) {
+				return result;
+			}
+			if (!(queryContent instanceof List)) {
+				queryContent = Arrays.asList(queryContent);
+			}
+			for (Object single : (List<?>) queryContent) {
+				if (single == null) {
+					continue;
+				}
+				result.add((String) single);
+			}
+		}
+		else {
+			List<Element> asElementList = query(element, query).asElementList();
+			for (Element single : asElementList) {
+				result.add(single.getTextContent().trim());
+			}
+		}
+		return result;
+	}
+	private String queryAsString(Element element, String query, String defaultValue) {
+		if (optimizedQuerying) {
+			Object result = queryContent(element, query);
+			if (result instanceof List) {
+				result = ((List<?>) result).size() > 0 ? ((List<?>) result).get(0) : null;
+			}
+			if (result == null) {
+				result = defaultValue;
+			}
+			return (String) result;
+		}
+		else {
+			return query(element, query).asString(defaultValue);
+		}
+	}
+
+	private Object queryContent(Element element, String query) {
 		// we don't care about namespaces
-		query = query.replace("edm:", "")
+		query = query
+			.replace("edm:", "")
 			.replace("edmx:", "");
-		return ParsedPath.parse(query);
-	}
-	
-	private List<Node> queryContent(Node node, ParsedPath path) {
-		if (pathAnalyzer == null) {
-			pathAnalyzer = new PathAnalyzer<Object>(new PlainOperationProvider());
+		try {
+			if (pathAnalyzer == null) {
+				pathAnalyzer = new PathAnalyzer<Object>(new PlainOperationProvider());
+			}
+			Operation<Object> analyze = pathAnalyzer.analyze(QueryParser.getInstance().parse(query));
+			return analyze.evaluate(new XMLContent(element));
+		}
+		catch (Exception e) {
+			throw new RuntimeException(e);
 		}
 	}
 	
@@ -395,10 +601,11 @@ public class ODataParser {
 			navigation.setQualifiedName(namespace + "." + name);
 			definition.getNavigationProperties().add(navigation);
 		}
-		List<Element> keyList = query(element, "edm:Key/edm:PropertyRef").asElementList();
+//		List<Element> keyList = query(element, "edm:Key/edm:PropertyRef").asElementList();
+		List<String> keyList = queryAsStringList(element, "edm:Key/edm:PropertyRef/@Name");
 		// if we have exactly one key, mark it as primary
 		if (keyList.size() == 1) {
-			String primaryKeyName = keyList.get(0).getAttribute("Name");
+			String primaryKeyName = keyList.get(0);
 			if (primaryKeyName != null) {
 				be.nabu.libs.types.api.Element<?> primaryKeyElement = structure.get(primaryKeyName);
 				if (primaryKeyElement != null) {

@@ -1,4 +1,4 @@
-package be.nabu.utils.odata.parser;
+package be.nabu.libs.odata.parser;
 
 import java.util.List;
 
