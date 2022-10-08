@@ -258,12 +258,27 @@ public class ODataParser {
 		// by default we can insert
 //		boolean canInsert = !singleton && "true".equals(query(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='Insertable']/@Bool").asString("true"));
 		boolean canInsert = !singleton && "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='Insertable']/@Bool", "true"));
+		// searching is basically a "q" parameter, it searches object wide and uses a contains
+		// not supported everywhere
 		boolean canSearch = !singleton && "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.SearchRestrictions']/edm:Record/edm:PropertyValue[@Property='Searchable']/@Bool", "true"));
+		// filter is supported more frequently, does not allow a contains and allows targeting specific fields
+		boolean canFilter = !singleton && "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.SelectSupport']/edm:Record/edm:PropertyValue[@Property='Filterable']/@Bool", "true"));
+		// if either one is set to false, we can't do it
+		canSearch &= "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.SelectSupport']/edm:Record/edm:PropertyValue[@Property='Searchable']/@Bool", "true"));
 		boolean canDelete = !singleton && "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.DeleteRestrictions']/edm:Record/edm:PropertyValue[@Property='Deletable']/@Bool", "true"));
 		boolean canUpdate = true && "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.UpdateRestrictions']/edm:Record/edm:PropertyValue[@Property='Updatable']/@Bool", "true"));
 		// we presume you can always list/read though additional searching is not always guaranteed
 		boolean listable = true;
 		boolean gettable = listable;
+		
+		boolean canSkip = !singleton && "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.SkipSupported']/@Bool", "true"));
+		canSkip &= "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.SelectSupport']/edm:Record/edm:PropertyValue[@Property='SkipSupported']/@Bool", "true"));
+		boolean canTop = !singleton && "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.TopSupported']/@Bool", "true"));
+		canTop &= "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.SelectSupport']/edm:Record/edm:PropertyValue[@Property='TopSupported']/@Bool", "true"));
+		boolean canCount = !singleton && "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.CountRestrictions']/edm:Record/edm:PropertyValue[@Property='Countable']/@Bool", "true"));
+		canCount &= "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.SelectSupport']/edm:Record/edm:PropertyValue[@Property='CountSupported']/@Bool", "true"));
+		
+		boolean canOrder = !singleton && "true".equals(queryAsString(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.SelectSupport']/edm:Record/edm:PropertyValue[@Property='Sortable']/@Bool", "true"));
 		
 		// if we can insert, we want to add a function for that
 		// we make an extension of the original type
@@ -315,7 +330,22 @@ public class ODataParser {
 			Structure input = new Structure();
 			input.setName("input");
 			if (canSearch) {
-				input.add(new SimpleElementImpl<String>("query", SimpleTypeWrapperFactory.getInstance().getWrapper().wrap(String.class), input, new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0)));
+				input.add(new SimpleElementImpl<String>("search", SimpleTypeWrapperFactory.getInstance().getWrapper().wrap(String.class), input, new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0)));
+			}
+			if (canFilter) {
+				input.add(new SimpleElementImpl<String>("filter", SimpleTypeWrapperFactory.getInstance().getWrapper().wrap(String.class), input, new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0)));
+			}
+			if (canOrder) {
+				input.add(new SimpleElementImpl<String>("orderBy", SimpleTypeWrapperFactory.getInstance().getWrapper().wrap(String.class), input, new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0), new ValueImpl<Integer>(MaxOccursProperty.getInstance(), 0)));
+			}
+			if (canTop) {
+				input.add(new SimpleElementImpl<Integer>("limit", SimpleTypeWrapperFactory.getInstance().getWrapper().wrap(Integer.class), input, new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0)));
+			}
+			if (canSkip) {
+				input.add(new SimpleElementImpl<Long>("offset", SimpleTypeWrapperFactory.getInstance().getWrapper().wrap(Long.class), input, new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0)));
+			}
+			if (canCount) {
+				input.add(new SimpleElementImpl<Boolean>("totalCount", SimpleTypeWrapperFactory.getInstance().getWrapper().wrap(Boolean.class), input, new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0)));
 			}
 			Structure output = new Structure();
 			output.setName("output");
@@ -675,7 +705,8 @@ public class ODataParser {
 			}
 			// Contains a date and time as an offset in minutes from GMT.
 			else if ("Edm.DateTimeOffset".equals(name)) {
-				wrapper = Integer.class;
+				wrapper = Date.class;
+//				wrapper = Integer.class;
 			}
 			// Numeric values with fixed precision and scale
 			// we might want to change this to bigdecimal in the future...
