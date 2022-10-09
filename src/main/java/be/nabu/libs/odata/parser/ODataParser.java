@@ -442,6 +442,10 @@ public class ODataParser {
 			}
 			Structure input = new Structure();
 			input.setName("input");
+			
+			// for the update, adding the primary key to the actual function input is often unnecessary duplication because it will also be in the body
+			// however, in the future we might allow for patch updates which are not guaranteed to have the primary key in the body
+			// additionally, the existence of the primary key in the function input is taken as an indicator that the eventual call needs the primary key in the target path
 			boolean foundPrimary = false;
 			for (be.nabu.libs.types.api.Element<?> child : TypeUtils.getAllChildren(((ComplexType) type))) {
 				Boolean primaryKey = ValueUtils.getValue(PrimaryKeyProperty.getInstance(), child.getProperties());
