@@ -1,6 +1,7 @@
 package be.nabu.libs.odata.parser;
 
 import java.io.InputStream;
+import java.math.BigDecimal;
 import java.net.CookieManager;
 import java.net.CookiePolicy;
 import java.net.URI;
@@ -47,7 +48,6 @@ import be.nabu.libs.types.TypeRegistryImpl;
 import be.nabu.libs.types.TypeUtils;
 import be.nabu.libs.types.api.ComplexType;
 import be.nabu.libs.types.api.DefinedType;
-import be.nabu.libs.types.api.ModifiableElement;
 import be.nabu.libs.types.api.ModifiableType;
 import be.nabu.libs.types.api.SimpleType;
 import be.nabu.libs.types.api.Type;
@@ -59,11 +59,13 @@ import be.nabu.libs.types.base.UUIDFormat;
 import be.nabu.libs.types.base.ValueImpl;
 import be.nabu.libs.types.java.BeanResolver;
 import be.nabu.libs.types.properties.AliasProperty;
+import be.nabu.libs.types.properties.CollectionCrudProviderProperty;
 import be.nabu.libs.types.properties.CollectionNameProperty;
 import be.nabu.libs.types.properties.DuplicateProperty;
 import be.nabu.libs.types.properties.EnumerationProperty;
 import be.nabu.libs.types.properties.ForeignKeyProperty;
 import be.nabu.libs.types.properties.ForeignNameProperty;
+import be.nabu.libs.types.properties.FormatProperty;
 import be.nabu.libs.types.properties.MaxOccursProperty;
 import be.nabu.libs.types.properties.MinOccursProperty;
 import be.nabu.libs.types.properties.NameProperty;
@@ -284,6 +286,7 @@ public class ODataParser {
 		
 		// update the collection name!
 		((ModifiableType) type).setProperty(new ValueImpl<String>(CollectionNameProperty.getInstance(), name));
+		((ModifiableType) type).setProperty(new ValueImpl<String>(CollectionCrudProviderProperty.getInstance(), "odata"));
 		
 		// by default we can insert
 //		boolean canInsert = !singleton && "true".equals(query(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='Insertable']/@Bool").asString("true"));
@@ -734,6 +737,8 @@ public class ODataParser {
 		((TypeRegistryImpl) definition.getRegistry()).register(enumType);
 	}
 	
+	private List<String> emptyComplexTypes = new ArrayList<String>();
+	
 	// we do an initial run over the complex types so we have _a_ functional reference of all types before we start parsing
 	// the problem is as ever: the order of the complex types is not guaranteed, if the first type reference the second type it is syntactically correct but sequentially unknown at that point
 	private void preparseComplexType(Element element, ODataDefinitionImpl definition, String namespace) {
@@ -756,6 +761,21 @@ public class ODataParser {
 			id += "types.";
 		}
 		structure.setId(id + name);
+		
+		// check if it is empty, for example ms graph sharepoint odata has an element like this:
+		// <ComplexType Name="root" />
+		// we want to switch this to java.lang.object
+		NodeList childNodes = element.getChildNodes();
+		boolean empty = true;
+		for (int i = 0; i < childNodes.getLength(); i++) {
+			if (childNodes.item(i).getNodeType() == Node.ELEMENT_NODE) {
+				empty = false;
+				break;
+			}
+		}
+		if (empty) {
+			emptyComplexTypes.add(id + name);
+		}
 	}
 	
 	private List<Runnable> parseComplexType(Element element, ODataDefinitionImpl definition, String namespace) {
@@ -878,6 +898,7 @@ public class ODataParser {
 		boolean nillable = !child.hasAttribute("Nullable") || "true".equals(child.getAttribute("Nullable"));
 		values.add(new ValueImpl<Boolean>(NillableProperty.getInstance(), nillable));
 		values.add(new ValueImpl<Integer>(MinOccursProperty.getInstance(), nillable ? 0 : 1 ));
+		values.addAll(getTypeProperties(definition, childType));
 		if (type instanceof ComplexType) {
 			return new ComplexElementImpl(childName, (ComplexType) type, structure, values.toArray(new Value[0]));
 		}
@@ -889,6 +910,17 @@ public class ODataParser {
 		}
 	}
 	
+	private List<Value<?>> getTypeProperties(ODataDefinitionImpl definition, String childType) {
+		List<Value<?>> values = new ArrayList<Value<?>>();
+		if ("Edm.Date".equals(childType)) {
+			values.add(new ValueImpl<String>(FormatProperty.getInstance(), "date"));
+		}
+		else if ("Edm.Time".equals(childType)) {
+			values.add(new ValueImpl<String>(FormatProperty.getInstance(), "time"));
+		}
+		return values;
+	}
+
 	private Type getType(ODataDefinition definition, String name) {
 		// A point representing a geographic location on the globe. For request and response bodies the representation of values of this type follows the GeoJSON "Point" type format.
 		// For URLs OData uses a literal form based on the WKT standard. A point literal is constructed as geography'POINT(lon lat)'.
@@ -938,7 +970,7 @@ public class ODataParser {
 			// Numeric values with fixed precision and scale
 			// we might want to change this to bigdecimal in the future...
 			else if ("Edm.Decimal".equals(name)) {
-				wrapper = Double.class;
+				wrapper = BigDecimal.class;
 			}
 			// A floating point number with 15 digits precision
 			else if ("Edm.Double".equals(name)) {
@@ -988,6 +1020,12 @@ public class ODataParser {
 			String typeName = name.substring(index + 1);
 			ComplexType complexType = definition.getRegistry().getComplexType(typeNamespace, typeName);
 			if (complexType != null) {
+				if (complexType instanceof DefinedType) {
+					String id = ((DefinedType) complexType).getId();
+					if (emptyComplexTypes.contains(id)) {
+						return BeanResolver.getInstance().resolve(Object.class);
+					}
+				}
 				return complexType;
 			}
 			SimpleType<?> simpleType = definition.getRegistry().getSimpleType(typeNamespace, typeName);
