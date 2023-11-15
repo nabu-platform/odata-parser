@@ -48,6 +48,7 @@ import be.nabu.libs.types.TypeRegistryImpl;
 import be.nabu.libs.types.TypeUtils;
 import be.nabu.libs.types.api.ComplexType;
 import be.nabu.libs.types.api.DefinedType;
+import be.nabu.libs.types.api.ModifiableComplexType;
 import be.nabu.libs.types.api.ModifiableType;
 import be.nabu.libs.types.api.SimpleType;
 import be.nabu.libs.types.api.Type;
@@ -263,6 +264,10 @@ public class ODataParser {
 		for (int i = 0; i < children.getLength(); i++) {
 			parseEntityContainer((Element) children.item(i), definition, namespace);
 		}
+		
+		// make sure we expose "contained" navigation properties
+		processNavigationProperties(definition, namespace);
+		
 		for (Runnable runnable : runnables) {
 			runnable.run();
 		}
@@ -278,11 +283,97 @@ public class ODataParser {
 		}
 	}
 
+	// the key is the name of the entity type, the value is the name of the entity set
+	private Map<String, String> existingEntitySets = new HashMap<String, String>();
+	// all navigation properties can be accessed through the parent
+	// for non-contained navigation properties they can _also_ be accessed through the root
+	// however contained navigation properties can only be accessed through the parent so it is imperative that we expose them as well as an entity set with additional input parameters
+	// TODO: we should probably have a correct order if nested navigation properties
+	// e.g. a site has a folder which has a file should always be requested as site/folder/file not folder/site/file because the runner doesn't know the order
+	// currently we only support 1 deep with any guarantees
+	// note that the runner runs through the definition in order so maintaining that order when injecting parent fields should be enough
+	private void processNavigationProperties(ODataDefinitionImpl definition, String namespace) {
+		for (NavigationProperty property : definition.getNavigationProperties()) {
+			// http://docs.oasis-open.org/odata/odata/v4.0/cos01/part3-csdl/odata-v4.0-cos01-part3-csdl.html#_Toc372793924
+			// if it is a contained property, it can _only_ be accessed by the parent
+			// there are some edge cases that are not entirely clear:
+			// - can multiple parents have a contains on the same object? this means there are multiple paths to the same object (though it is likely different tables or whatever in the background)
+			// - in sharepoint for example, some "contained" are actually also available on root, the behavior appears to be that "listing" is done on the contained parent while getting (and further resolving children) is done on the root. this does not seem to appear in the spec
+			// - some contains are nested indefinitely, for example in sharepoint a site can contain a site can contain a site etc
+			// we want to remain compatible with CRUD which means to be able to filter on it and use it, it needs to be expressed as a field in the document rather than additional input parameters to the services
+			// in this way it is not unlike the @odata.id fields. we use @odata.parent.id fields to indicate this
+			// if nesting is detected, the parent id must be a list (or always a list?)
+			// if multiple parents are detected, all must be optional
+			// if a root set is detected, parent ids must be optional
+			if (property.isContainsTarget()) {
+				ComplexType parent = (ComplexType) getType(definition, property.getQualifiedName());
+				be.nabu.libs.types.api.Element<?> primaryKey = null;
+				// find the primary key
+				for (be.nabu.libs.types.api.Element<?> child : TypeUtils.getAllChildren(parent)) {
+					Boolean primary = ValueUtils.getValue(PrimaryKeyProperty.getInstance(), child.getProperties());
+					if (primary != null && primary) {
+						primaryKey = child;
+						break;
+					}
+				}
+				if (primaryKey == null) {
+					logger.error("Can not inject navigateable property because the primary key of the parent (" + property.getQualifiedName() + ") can not be found");
+				}
+				else {
+					Type originalType = property.getElement().getType();
+					if (originalType instanceof ModifiableComplexType && property instanceof NavigationPropertyImpl) {
+						Element domElement = ((NavigationPropertyImpl) property).getDomElement();
+						ModifiableComplexType type = (ModifiableComplexType) originalType;
+						Type parentType = getType(definition, property.getQualifiedName());
+						if (existingEntitySets.containsKey(parentType.getName())) {
+							// we want the entity _set_ name, not the type
+							String name = existingEntitySets.get(parentType.getName()) + "@odata.parent.id";
+							be.nabu.libs.types.api.Element<?> cloned = TypeBaseUtils.clone(primaryKey, type);
+							cloned.setProperty(new ValueImpl<String>(NameProperty.getInstance(), name));
+							// TODO: not always optional?
+							cloned.setProperty(new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0));
+							// TODO: not always a list?
+							cloned.setProperty(new ValueImpl<Integer>(MaxOccursProperty.getInstance(), 0));
+							// unset the primary key
+							cloned.setProperty(new ValueImpl<Boolean>(PrimaryKeyProperty.getInstance(), false));
+							type.add(cloned);
+							// only one entity set per type? for example sharepoint has a native "drives" entity set and both nested "drive" and "drives" entity sets, all these should be accessed through the global "drives"
+							String typeName = cleanup(domElement.getAttribute("Type"));
+							Type childType = getType(definition, typeName);
+							if (!existingEntitySets.containsKey(childType.getName()) && !existingEntitySets.containsValue(property.getElement().getName())) {
+								parseEntitySet(definition, domElement, namespace);
+							}
+						}
+						else {
+							logger.error("Could not determine the entity set for the parent of the contained navigation " + property.getElement().getName() + ": " + parentType.getName());
+						}
+					}
+					else {
+						logger.error("Could not enrich navigation property " + property.getElement().getName() + " in " + property.getQualifiedName() + " because the type is not modifiable: " + originalType);
+					}
+				}
+			}
+		}
+	}
+
+	private String cleanup(String typeName) {
+		if (typeName.startsWith("Collection(")) {
+			// skip the closing ) as well
+			typeName = typeName.substring("Collection(".length(), typeName.length() - 1);
+		}
+		return typeName;
+	}
+
 	private void parseEntitySet(ODataDefinitionImpl definition, Element childElement, String namespace) {
 		String name = childElement.getAttribute("Name");
 		boolean singleton = childElement.getLocalName().equals("Singleton");
-		String typeName = childElement.getAttribute(singleton ? "Type" : "EntityType");
+		String typeName = cleanup(childElement.getAttribute(singleton || childElement.getTagName().equalsIgnoreCase("NavigationProperty") ? "Type" : "EntityType"));
+		if (typeName.trim().isEmpty()) {
+			throw new IllegalArgumentException("Can not find correct type for " + childElement.getTagName() + " with name: " + name);
+		}
 		Type type = getType(definition, typeName);
+		// because of aliases etc, the full namespace name might not match the configured name, hence we just use the base name
+		existingEntitySets.put(type.getName(), name);
 		
 		// update the collection name!
 		((ModifiableType) type).setProperty(new ValueImpl<String>(CollectionNameProperty.getInstance(), name));
@@ -793,8 +884,11 @@ public class ODataParser {
 		children = element.getElementsByTagNameNS(NS_EDM, "NavigationProperty");
 		for (int i = 0; i < children.getLength(); i++) {
 			NavigationPropertyImpl navigation = new NavigationPropertyImpl();
-			navigation.setElement(buildElement(definition, structure, (Element) children.item(i)));
+			Element navigationItem = (Element) children.item(i);
+			navigation.setElement(buildElement(definition, structure, navigationItem));
 			navigation.setQualifiedName(namespace + "." + name);
+			navigation.setContainsTarget(navigationItem.hasAttribute("ContainsTarget") && "true".equalsIgnoreCase(navigationItem.getAttribute("ContainsTarget")));
+			navigation.setDomElement(navigationItem);
 			definition.getNavigationProperties().add(navigation);
 			NodeList constraints = ((Element) children.item(i)).getElementsByTagNameNS(NS_EDM, "ReferentialConstraint");
 			// for updating, we can't actually push the foreign keys themselves, we need to wrap it
