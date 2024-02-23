@@ -119,7 +119,7 @@ public class ODataParser {
 
 	private PathAnalyzer<Object> pathAnalyzer;
 	
-	private List<ODataExpansion> expansions;
+	private List<ODataEntityConfiguration> entityConfigurations;
 	
 	public ODataDefinition parse(URI url) throws ParseException {
 		try (InputStream metadata = getMetadata(url)) {
@@ -240,6 +240,11 @@ public class ODataParser {
 		children = element.getElementsByTagNameNS(NS_EDM, "EntityType");
 		for (int i = 0; i < children.getLength(); i++) {
 			preparseComplexType((Element) children.item(i), definition, namespace);
+		}
+		// make sure we have the correct collection names
+		children = element.getElementsByTagNameNS(NS_EDM, "EntitySet");
+		for (int i = 0; i < children.getLength(); i++) {
+			preparseEntitySet(definition, (Element) children.item(i), namespace);
 		}
 	}
 	
@@ -364,6 +369,25 @@ public class ODataParser {
 		return typeName;
 	}
 
+	// we want to make sure that all collection names are correctly set before we start using them
+	// this is especially relevant for navigationproperties that do not have a specific NavigationPropertyBinding with a target attribute at which point we fall back to the collection name set on the structure itself
+	private void preparseEntitySet(ODataDefinitionImpl definition, Element childElement, String namespace) {
+		String name = childElement.getAttribute("Name");
+		try {
+			boolean singleton = childElement.getLocalName().equals("Singleton");
+			String typeName = cleanup(childElement.getAttribute(singleton || childElement.getTagName().equalsIgnoreCase("NavigationProperty") ? "Type" : "EntityType"));
+			if (typeName.trim().isEmpty()) {
+				throw new IllegalArgumentException("Can not find correct type for " + childElement.getTagName() + " with name: " + name);
+			}
+			Type type = getType(definition, typeName);
+			((ModifiableType) type).setProperty(new ValueImpl<String>(CollectionNameProperty.getInstance(), name));
+		}
+		// it is best effort
+		catch (Exception e) {
+			logger.error("Could not preparse entity set " + name, e);
+		}
+	}
+	
 	private void parseEntitySet(ODataDefinitionImpl definition, Element childElement, String namespace) {
 		String name = childElement.getAttribute("Name");
 		boolean singleton = childElement.getLocalName().equals("Singleton");
@@ -491,10 +515,16 @@ public class ODataParser {
 		((TypeRegistryImpl) definition.getRegistry()).register(selectExtension);
 		String structureId = ((DefinedType) type).getId();
 		List<String> expansions = new ArrayList<String>();
-		if (this.expansions != null) {
-			for (ODataExpansion expansion : this.expansions) {
-				if (structureId.equals(expansion.getEntity()) && expansion.getExpansions() != null) {
-					expansions.addAll(expansion.getExpansions());
+		List<String> managedBindings = new ArrayList<String>();
+		if (this.entityConfigurations != null) {
+			for (ODataEntityConfiguration entityConfiguration : this.entityConfigurations) {
+				if (structureId.equals(entityConfiguration.getEntity())) {
+					if (entityConfiguration.getExpansions() != null) {
+						expansions.addAll(entityConfiguration.getExpansions());
+					}
+					if (entityConfiguration.getManagedBindings() != null) {
+						managedBindings.addAll(entityConfiguration.getManagedBindings());
+					}
 				}
 			}
 		}
@@ -695,9 +725,8 @@ public class ODataParser {
 			if (foundPrimary) {
 				input.add(new ComplexElementImpl("update", inputExtension, input));
 				Structure output = new Structure();
-				output.setName("input");
+				output.setName("output");
 				FunctionImpl update = new FunctionImpl();
-				update.setContext(name);
 				update.setContext(name);
 				// a patch with the full document is the same as a PUT
 				// according to the specifications a PATCH _should_ be supported, a PUT _may_ be supported
@@ -707,6 +736,74 @@ public class ODataParser {
 				update.setAction(true);
 				update.setName("update");
 				definition.getFunctions().add(update);
+			}
+		}
+		// if we have managed bindings, add a service for it
+		if (!managedBindings.isEmpty()) {
+			for (String managedBinding : managedBindings) {
+				Structure input = new Structure();
+				input.setName("input");
+				
+				// for the update, adding the primary key to the actual function input is often unnecessary duplication because it will also be in the body
+				// however, in the future we might allow for patch updates which are not guaranteed to have the primary key in the body
+				// additionally, the existence of the primary key in the function input is taken as an indicator that the eventual call needs the primary key in the target path
+				boolean foundPrimary = false;
+				for (be.nabu.libs.types.api.Element<?> child : TypeUtils.getAllChildren(((ComplexType) type))) {
+					Boolean primaryKey = ValueUtils.getValue(PrimaryKeyProperty.getInstance(), child.getProperties());
+					if (primaryKey != null && primaryKey) {
+						be.nabu.libs.types.api.Element<?> cloned = TypeBaseUtils.clone(child, input);
+						// we want to standardize the name
+//						cloned.setProperty(new ValueImpl<String>(NameProperty.getInstance(), "id"));
+						// in such a case it is mandatory!
+						cloned.setProperty(new ValueImpl<String>(NameProperty.getInstance(), "entityId"));
+						cloned.setProperty(new ValueImpl<Integer>(MinOccursProperty.getInstance(), 1));
+						cloned.setProperty(new ValueImpl<Integer>(MaxOccursProperty.getInstance(), 1));
+						input.add(cloned);
+						foundPrimary = true;
+					}
+				}
+				if (foundPrimary) {
+					boolean foundNavigation = false;
+					for (NavigationProperty navigatableChild : navigatableChildren) {
+						if (managedBinding.equals(navigatableChild.getElement().getName())) {
+							// we need to find the primary key
+							if (navigatableChild.getElement().getType() instanceof ComplexType) {
+								for (be.nabu.libs.types.api.Element<?> navigateChild : TypeUtils.getAllChildren((ComplexType) navigatableChild.getElement().getType())) {
+									Boolean primaryKey = ValueUtils.getValue(PrimaryKeyProperty.getInstance(), navigateChild.getProperties());
+									if (primaryKey != null && primaryKey) {
+										be.nabu.libs.types.api.Element<?> cloned = TypeBaseUtils.clone(navigateChild, input);
+										cloned.setProperty(new ValueImpl<String>(NameProperty.getInstance(), "boundIds"));
+										cloned.setProperty(new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0));
+										cloned.setProperty(new ValueImpl<Integer>(MaxOccursProperty.getInstance(), 0));
+										cloned.setProperty(new ValueImpl<String>(AliasProperty.getInstance(), managedBinding));
+										String collectionName = queryAsString(childElement, "edm:NavigationPropertyBinding[@Path='" + navigatableChild.getElement().getName() + "']/@Target", null);
+										// it might not be a bound navigation property, fall back to the original properties
+										if (collectionName == null) {
+											collectionName = ValueUtils.getValue(CollectionNameProperty.getInstance(), navigatableChild.getElement().getProperties());
+										}
+										cloned.setProperty(new ValueImpl<String>(CollectionNameProperty.getInstance(), collectionName));
+										input.add(cloned);
+										foundNavigation = true;
+									}
+								}
+							}
+						}
+					}
+					if (foundNavigation) {
+						Structure output = new Structure();
+						output.setName("output");
+						FunctionImpl update = new FunctionImpl();
+						update.setContext(name);
+						// a patch with the full document is the same as a PUT
+						// according to the specifications a PATCH _should_ be supported, a PUT _may_ be supported
+						update.setMethod("MERGE-ASSOCIATIONS");
+						update.setInput(input);
+						update.setOutput(output);
+						update.setAction(true);
+						update.setName("update" + managedBinding.substring(0, 1).toUpperCase() + managedBinding.substring(1));
+						definition.getFunctions().add(update);
+					}
+				}
 			}
 		}
 	}
@@ -1138,12 +1235,12 @@ public class ODataParser {
 		this.baseId = baseId;
 	}
 
-	public List<ODataExpansion> getExpansions() {
-		return expansions;
+	public List<ODataEntityConfiguration> getEntityConfigurations() {
+		return entityConfigurations;
 	}
 
-	public void setExpansions(List<ODataExpansion> expansions) {
-		this.expansions = expansions;
+	public void setEntityConfigurations(List<ODataEntityConfiguration> entityConfiguration) {
+		this.entityConfigurations = entityConfiguration;
 	}
 	
 }
