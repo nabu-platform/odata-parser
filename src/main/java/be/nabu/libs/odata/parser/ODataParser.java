@@ -59,6 +59,7 @@ import be.nabu.libs.types.base.TypeBaseUtils;
 import be.nabu.libs.types.base.UUIDFormat;
 import be.nabu.libs.types.base.ValueImpl;
 import be.nabu.libs.types.java.BeanResolver;
+import be.nabu.libs.types.java.BeanType;
 import be.nabu.libs.types.properties.AliasProperty;
 import be.nabu.libs.types.properties.CollectionCrudProviderProperty;
 import be.nabu.libs.types.properties.CollectionNameProperty;
@@ -380,12 +381,18 @@ public class ODataParser {
 				throw new IllegalArgumentException("Can not find correct type for " + childElement.getTagName() + " with name: " + name);
 			}
 			Type type = getType(definition, typeName);
-			((ModifiableType) type).setProperty(new ValueImpl<String>(CollectionNameProperty.getInstance(), name));
+			if (!isObject(type)) {
+				((ModifiableType) type).setProperty(new ValueImpl<String>(CollectionNameProperty.getInstance(), name));
+			}
 		}
 		// it is best effort
 		catch (Exception e) {
 			logger.error("Could not preparse entity set " + name, e);
 		}
+	}
+	
+	private boolean isObject(Type type) {
+		return type instanceof BeanType && ((BeanType<?>) type).getBeanClass().equals(Object.class);
 	}
 	
 	private void parseEntitySet(ODataDefinitionImpl definition, Element childElement, String namespace) {
@@ -399,9 +406,11 @@ public class ODataParser {
 		// because of aliases etc, the full namespace name might not match the configured name, hence we just use the base name
 		existingEntitySets.put(type.getName(), name);
 		
-		// update the collection name!
-		((ModifiableType) type).setProperty(new ValueImpl<String>(CollectionNameProperty.getInstance(), name));
-		((ModifiableType) type).setProperty(new ValueImpl<String>(CollectionCrudProviderProperty.getInstance(), "odata"));
+		// update the collection name if it is NOT an object!
+		if (!isObject(type)) {
+			((ModifiableType) type).setProperty(new ValueImpl<String>(CollectionNameProperty.getInstance(), name));
+			((ModifiableType) type).setProperty(new ValueImpl<String>(CollectionCrudProviderProperty.getInstance(), "odata"));
+		}
 		
 		// by default we can insert
 //		boolean canInsert = !singleton && "true".equals(query(childElement, "edm:Annotation[@Term = 'Org.OData.Capabilities.V1.InsertRestrictions']/edm:Record/edm:PropertyValue[@Property='Insertable']/@Bool").asString("true"));
@@ -459,7 +468,7 @@ public class ODataParser {
 			for (NavigationProperty navigatableChild : navigatableChildren) {
 				String collectionName = queryAsString(childElement, "edm:NavigationPropertyBinding[@Path='" + navigatableChild.getElement().getName() + "']/@Target", null);
 				// if we haven't restricted it, add it as an optional element (list?) to the insert
-				if (!restrictedNames.contains(navigatableChild.getElement().getName())) {
+				if (!restrictedNames.contains(navigatableChild.getElement().getName()) && !isObject(navigatableChild.getElement().getType())) {
 					be.nabu.libs.types.api.Element<?> clone = TypeBaseUtils.clone(navigatableChild.getElement(), inputExtension);
 					clone.setProperty(new ValueImpl<String>(CollectionNameProperty.getInstance(), collectionName));
 					inputExtension.add(clone);
@@ -688,7 +697,7 @@ public class ODataParser {
 			for (NavigationProperty navigatableChild : navigatableChildren) {
 				String collectionName = queryAsString(childElement, "edm:NavigationPropertyBinding[@Path='" + navigatableChild.getElement().getName() + "']/@Target", null);
 				// if we haven't restricted it, add it as an optional element (list?) to the insert
-				if (!restrictedNames.contains(navigatableChild.getElement().getName())) {
+				if (!restrictedNames.contains(navigatableChild.getElement().getName()) && !isObject(navigatableChild.getElement().getType())) {
 					be.nabu.libs.types.api.Element<?> clone = TypeBaseUtils.clone(navigatableChild.getElement(), inputExtension);
 					// we want to set the collection name to the correct one for this entity set OR to null at which point the collection name on the type itself should be used
 					clone.setProperty(new ValueImpl<String>(CollectionNameProperty.getInstance(), collectionName));
@@ -767,7 +776,7 @@ public class ODataParser {
 					for (NavigationProperty navigatableChild : navigatableChildren) {
 						if (managedBinding.equals(navigatableChild.getElement().getName())) {
 							// we need to find the primary key
-							if (navigatableChild.getElement().getType() instanceof ComplexType) {
+							if (navigatableChild.getElement().getType() instanceof ComplexType && !isObject(navigatableChild.getElement().getType())) {
 								for (be.nabu.libs.types.api.Element<?> navigateChild : TypeUtils.getAllChildren((ComplexType) navigatableChild.getElement().getType())) {
 									Boolean primaryKey = ValueUtils.getValue(PrimaryKeyProperty.getInstance(), navigateChild.getProperties());
 									if (primaryKey != null && primaryKey) {
@@ -792,6 +801,9 @@ public class ODataParser {
 					if (foundNavigation) {
 						Structure output = new Structure();
 						output.setName("output");
+						
+						// we want an update function that makes sure the resulting bindings are the ones you passed in
+						// any superfluous ones are deleted and only the ones you pass in are active
 						FunctionImpl update = new FunctionImpl();
 						update.setContext(name);
 						// a patch with the full document is the same as a PUT
@@ -802,6 +814,30 @@ public class ODataParser {
 						update.setAction(true);
 						update.setName("update" + managedBinding.substring(0, 1).toUpperCase() + managedBinding.substring(1));
 						definition.getFunctions().add(update);
+						
+						// we want an "add" function that makes sure you can add bindings
+						FunctionImpl add = new FunctionImpl();
+						add.setContext(name);
+						// a patch with the full document is the same as a PUT
+						// according to the specifications a PATCH _should_ be supported, a PUT _may_ be supported
+						add.setMethod("ADD-ASSOCIATIONS");
+						add.setInput(input);
+						add.setOutput(output);
+						add.setAction(true);
+						add.setName("add" + managedBinding.substring(0, 1).toUpperCase() + managedBinding.substring(1));
+						definition.getFunctions().add(add);
+						
+						// we want an "remove" function that makes sure you can remove bindings
+						FunctionImpl remove = new FunctionImpl();
+						remove.setContext(name);
+						// a patch with the full document is the same as a PUT
+						// according to the specifications a PATCH _should_ be supported, a PUT _may_ be supported
+						remove.setMethod("REMOVE-ASSOCIATIONS");
+						remove.setInput(input);
+						remove.setOutput(output);
+						remove.setAction(true);
+						remove.setName("remove" + managedBinding.substring(0, 1).toUpperCase() + managedBinding.substring(1));
+						definition.getFunctions().add(remove);
 					}
 				}
 			}
@@ -939,10 +975,11 @@ public class ODataParser {
 		((TypeRegistryImpl) definition.getRegistry()).register(structure);
 
 		String id = baseId == null ? "" : baseId + ".";
+		boolean setCollectionName = false;
 		// we parse ComplexType with the same code as entity type but complextype have no persistence, they are helper definitions
 		// if we are an entity type, we add a collection name as a marker of persistence
 		if (element.getLocalName().equals("EntityType")) {
-			structure.setProperty(new ValueImpl<String>(CollectionNameProperty.getInstance(), name));
+			setCollectionName = true;
 			id += "entities.";
 		}
 		else {
@@ -962,7 +999,11 @@ public class ODataParser {
 			}
 		}
 		if (empty) {
+			setCollectionName = false;
 			emptyComplexTypes.add(id + name);
+		}
+		if (setCollectionName) {
+			structure.setProperty(new ValueImpl<String>(CollectionNameProperty.getInstance(), name));
 		}
 	}
 	
