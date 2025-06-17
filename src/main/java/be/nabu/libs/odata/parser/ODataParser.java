@@ -802,6 +802,10 @@ public class ODataParser {
 										cloned.setProperty(new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0));
 										cloned.setProperty(new ValueImpl<Integer>(MaxOccursProperty.getInstance(), 0));
 										cloned.setProperty(new ValueImpl<String>(AliasProperty.getInstance(), managedBinding));
+										// if it is a defined type, add a foreign key, we need this to know the field we want to use as id in our result set
+										if (navigatableChild.getElement().getType() instanceof DefinedType) {
+											cloned.setProperty(new ValueImpl<String>(ForeignKeyProperty.getInstance(), ((DefinedType) navigatableChild.getElement().getType()).getId() + ":" + navigateChild.getName()));
+										}
 										String collectionName = queryAsString(childElement, "edm:NavigationPropertyBinding[@Path='" + navigatableChild.getElement().getName() + "']/@Target", null);
 										// it might not be a bound navigation property, fall back to the original properties
 										if (collectionName == null) {
@@ -855,6 +859,22 @@ public class ODataParser {
 						remove.setAction(true);
 						remove.setName("remove" + managedBinding.substring(0, 1).toUpperCase() + managedBinding.substring(1));
 						definition.getFunctions().add(remove);
+						
+						FunctionImpl list = new FunctionImpl();
+						list.setContext(name);
+						list.setMethod("LIST-ASSOCIATIONS");
+						Structure listOutput = new Structure();
+						listOutput.setName("output");
+						listOutput.add(TypeBaseUtils.clone(input.get("boundIds"), listOutput));
+						list.setOutput(listOutput);
+						Structure listInput = new Structure();
+						listInput.setName("input");
+						listInput.add(TypeBaseUtils.clone(input.get("entityId"), listInput));
+						listInput.add(new SimpleElementImpl<String>("filter", SimpleTypeWrapperFactory.getInstance().getWrapper().wrap(String.class), input, new ValueImpl<Integer>(MinOccursProperty.getInstance(), 0)));
+						list.setInput(listInput);
+						list.setAction(true);
+						list.setName("list" + managedBinding.substring(0, 1).toUpperCase() + managedBinding.substring(1));
+						definition.getFunctions().add(list);
 					}
 				}
 			}
