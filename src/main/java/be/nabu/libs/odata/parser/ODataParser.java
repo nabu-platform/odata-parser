@@ -891,10 +891,27 @@ public class ODataParser {
 		return navigatableChildren;
 	}
 	
-	private boolean optimizedQuerying = true;
+	private boolean useOptimizedQuerying = "true".equals(System.getProperty("odata.optimizedQuerying", "false"));
 	
 	private List<Element> queryAsElementList(Element element, String query) {
-		if (optimizedQuerying) {
+		if (useOptimizedQuerying) {
+			Object queryContent = queryContent2(element, query);
+			List<Element> result = new ArrayList<Element>();
+			if (queryContent == null) {
+				return result;
+			}
+			if (!(queryContent instanceof List)) {
+				queryContent = Arrays.asList(queryContent);
+			}
+			for (Object single : (List<?>) queryContent) {
+				if (single == null) {
+					continue;
+				}
+				result.add((Element) single);
+			}
+			return result;
+		}
+		else {
 			Object queryContent = queryContent(element, query);
 			List<Element> result = new ArrayList<Element>();
 			if (queryContent == null) {
@@ -911,14 +928,28 @@ public class ODataParser {
 			}
 			return result;
 		}
-		else {
-			return query(element, query).asElementList();
-		}
 	}
 	
 	private List<String> queryAsStringList(Element element, String query) {
-		List<String> result = new ArrayList<String>();
-		if (optimizedQuerying) {
+		if (useOptimizedQuerying) {
+			Object queryContent = queryContent2(element, query);
+			List<String> result = new ArrayList<String>();
+			if (queryContent == null) {
+				return result;
+			}
+			if (!(queryContent instanceof List)) {
+				queryContent = Arrays.asList(queryContent);
+			}
+			for (Object single : (List<?>) queryContent) {
+				if (single == null) {
+					continue;
+				}
+				result.add((String) single);
+			}
+			return result;
+		}
+		else {
+			List<String> result = new ArrayList<String>();
 			Object queryContent = queryContent(element, query);
 			if (queryContent == null) {
 				return result;
@@ -932,18 +963,12 @@ public class ODataParser {
 				}
 				result.add((String) single);
 			}
+			return result;
 		}
-		else {
-			List<Element> asElementList = query(element, query).asElementList();
-			for (Element single : asElementList) {
-				result.add(single.getTextContent().trim());
-			}
-		}
-		return result;
 	}
 	private String queryAsString(Element element, String query, String defaultValue) {
-		if (optimizedQuerying) {
-			Object result = queryContent(element, query);
+		if (useOptimizedQuerying) {
+			Object result = queryContent2(element, query);
 			if (result instanceof List) {
 				result = ((List<?>) result).size() > 0 ? ((List<?>) result).get(0) : null;
 			}
@@ -953,10 +978,17 @@ public class ODataParser {
 			return (String) result;
 		}
 		else {
-			return query(element, query).asString(defaultValue);
+			Object result = queryContent(element, query);
+			if (result instanceof List) {
+				result = ((List<?>) result).size() > 0 ? ((List<?>) result).get(0) : null;
+			}
+			if (result == null) {
+				result = defaultValue;
+			}
+			return (String) result;
 		}
 	}
-
+	
 	private Object queryContent(Element element, String query) {
 		// we don't care about namespaces
 		query = query
@@ -972,6 +1004,99 @@ public class ODataParser {
 		catch (Exception e) {
 			throw new RuntimeException(e);
 		}
+	}
+	
+	private Object queryContent2(Element element, String query) {
+		// we don't care about namespaces
+		query = query
+			.replace("edm:", "")
+			.replace("edmx:", "");
+		
+		String[] parts = query.split("/");
+		
+		List<Element> current = new ArrayList<Element>();
+		current.add(element);
+		
+		for (int i = 0; i < parts.length; i++) {
+			String part = parts[i];
+			List<Element> next = new ArrayList<Element>();
+			
+			String nodeName = part;
+			String attributeName = null;
+			String attributeValue = null;
+			
+			if (part.contains("[")) {
+				nodeName = part.substring(0, part.indexOf("["));
+				String condition = part.substring(part.indexOf("[") + 1, part.indexOf("]"));
+				if (condition.startsWith("@")) {
+					String conditionContent = condition.substring(1);
+					int equalsIndex = conditionContent.indexOf('=');
+					if (equalsIndex != -1) {
+						attributeName = conditionContent.substring(0, equalsIndex).trim();
+						String rawValue = conditionContent.substring(equalsIndex + 1).trim();
+						if (rawValue.startsWith("'") && rawValue.endsWith("'")) {
+							attributeValue = rawValue.substring(1, rawValue.length() - 1);
+						}
+						else {
+							attributeValue = rawValue;
+						}
+					}
+				}
+			}
+			
+			for (Element currentElement : current) {
+				NodeList children = currentElement.getChildNodes();
+				for (int j = 0; j < children.getLength(); j++) {
+					if (children.item(j) instanceof Element) {
+						Element child = (Element) children.item(j);
+						if (child.getLocalName().equals(nodeName)) {
+							if (attributeName != null) {
+								if (child.getAttribute(attributeName).equals(attributeValue)) {
+									next.add(child);
+								}
+							}
+							else {
+								next.add(child);
+							}
+						}
+					}
+				}
+			}
+			current = next;
+			if (current.isEmpty()) {
+				return null;
+			}
+		}
+		
+		if (query.endsWith("/@Bool")) {
+			return current.get(0).getAttribute("Bool");
+		}
+		else if (query.endsWith("/@Name")) {
+			List<String> names = new ArrayList<String>();
+			for (Element el : current) {
+				names.add(el.getAttribute("Name"));
+			}
+			return names;
+		}
+		else if (query.endsWith("/@Target")) {
+			return current.get(0).getAttribute("Target");
+		}
+		else if (query.endsWith("Collection/PropertyPath")) {
+			List<String> paths = new ArrayList<String>();
+			for (Element el : current) {
+				paths.add(el.getTextContent());
+			}
+			return paths;
+		}
+		else if (query.endsWith("Collection/NavigationPropertyPath")) {
+			List<String> paths = new ArrayList<String>();
+			for (Element el : current) {
+				paths.add(el.getTextContent());
+			}
+			return paths;
+		}
+		
+		return current;
 	}
 	
 	private XPath query(Node node, String query) {
